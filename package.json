@@ -1,0 +1,23 @@
+{
+  "name": "folatac-v12",
+  "version": "12.1.0",
+  "private": true,
+  "description": "FOLATAC \u2014 Floor-Latched Tactical Accumulation Dashboard",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@vercel/kv": "^3.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
