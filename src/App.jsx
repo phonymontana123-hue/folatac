@@ -1834,7 +1834,9 @@ export default function FOLATAC() {
   // Daily portfolio snapshots for P&L from inception tracking
   const [snapshots, setSnapshots] = usePersistedState("fol_snaps_v1", []); // [{date, p1Total, p2Total, combined}]
   // Starting capital (locked at first use, editable in System tab)
-  const [startingCapital, setStartingCapital] = usePersistedState("fol_startcap", 211261);
+  const [startingCapital, setStartingCapital] = usePersistedState("fol_startcap", 0);
+  const [p1StartCap, setP1StartCap] = usePersistedState("fol_p1_startcap", 0);
+  const [p2StartCap, setP2StartCap] = usePersistedState("fol_p2_startcap", 0);
   // Manual pillar broken count (P2 regulatory can't be auto-detected)
   const [manualPillarsBroken, setManualPillarsBroken] = usePersistedState("fol_pillars", 0);
   // Exit confirmation signals (manually monitored per Section 11.4)
@@ -2242,10 +2244,17 @@ export default function FOLATAC() {
     }
   }, [market.mstr?.price, lastWeeklyAudit]);
 
-  // ── P&L from inception via daily snapshots
+  // ── P&L from inception via daily snapshots (separate P1 / P2)
   const latestSnapshot = snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
-  const inceptionPL = portVal ? portVal.combined - (startingCapital || 211261) : null;
-  const inceptionPLPct = portVal ? ((portVal.combined - (startingCapital || 211261)) / (startingCapital || 211261) * 100) : null;
+  const p1Total = portVal?.p1?.total || 0;
+  const p2Total = portVal?.p2?.total || 0;
+  const p1PL = p1StartCap > 0 ? p1Total - p1StartCap : null;
+  const p2PL = p2StartCap > 0 ? p2Total - p2StartCap : null;
+  const p1PLPct = p1StartCap > 0 ? ((p1Total - p1StartCap) / p1StartCap * 100) : null;
+  const p2PLPct = p2StartCap > 0 ? ((p2Total - p2StartCap) / p2StartCap * 100) : null;
+  const combinedStart = (p1StartCap || 0) + (p2StartCap || 0);
+  const inceptionPL = combinedStart > 0 && portVal ? portVal.combined - combinedStart : null;
+  const inceptionPLPct = combinedStart > 0 && portVal ? ((portVal.combined - combinedStart) / combinedStart * 100) : null;
 
   // ── "What do I do right now?" — legacy wrapper for backward compat
   const actionRec = topAction
@@ -2346,15 +2355,19 @@ export default function FOLATAC() {
         p2AssignmentDate: (result.p2AssignedShares>0&&!p.p2AssignmentDate) ? today : p.p2AssignmentDate,
       }));
 
+      // Auto-set starting capitals from first screenshot if not yet set
+      const ssP1Total = result.p1TotalAccountValue;
+      const ssP2Total = result.p2TotalAccountValue;
+      if (ssP1Total && !p1StartCap) setP1StartCap(ssP1Total);
+      if (ssP2Total && !p2StartCap) setP2StartCap(ssP2Total);
+
       // Auto-snapshot for P&L from inception (stores daily account value)
-      const p1Total = result.p1TotalAccountValue;
-      const p2Total = result.p2TotalAccountValue;
-      if (p1Total || p2Total) {
-        const combined = (p1Total||0) + (p2Total||0);
+      if (ssP1Total || ssP2Total) {
+        const combined = (ssP1Total||0) + (ssP2Total||0);
         setSnapshots(snaps => {
           const existing = snaps.find(s=>s.date===today);
-          if (existing) return snaps.map(s=>s.date===today ? {...s, p1Total, p2Total, combined} : s);
-          return [...snaps, { date:today, p1Total, p2Total, combined }];
+          if (existing) return snaps.map(s=>s.date===today ? {...s, p1Total:ssP1Total, p2Total:ssP2Total, combined} : s);
+          return [...snaps, { date:today, p1Total:ssP1Total, p2Total:ssP2Total, combined }];
         });
       }
 
@@ -2471,6 +2484,22 @@ export default function FOLATAC() {
       const smsTest = await processSMS("Test message — what is the strike today?",{btc:71680,mstr:148,iv:88,ivr:43,nav:0.952,allin:0},{p1s:0,p2s:0,leaps:0});
       results.sms = smsTest && smsTest.length>10 ? `PASS: Claude SMS API live — response: "${smsTest.slice(0,80)}..."` : "FAIL: Claude API returned empty response";
     } catch { results.sms = "FAIL: Claude API unreachable"; }
+    setTestComplete({...results});
+    await new Promise(r=>setTimeout(r,500));
+    // 6b. Real SMS/Telegram delivery test
+    try {
+      const deliveryResult = await sendRealSMS(
+        userPhone || null,
+        "FOLATAC TEST — SMS delivery confirmed. If you received this, your alert system is working.",
+        { carrier: userCarrier || undefined, telegramChatId: telegramChatId || undefined }
+      );
+      if (deliveryResult.ok) {
+        results.smsDelivery = `PASS: Message delivered via ${deliveryResult.channel}`;
+      } else {
+        const tried = deliveryResult.attempts?.map(a=>`${a.channel}:${a.error||"ok"}`).join(", ") || "none";
+        results.smsDelivery = `FAIL: All delivery channels failed. Tried: ${tried}. Set up at least one: Twilio, AWS SNS, Telegram, or Email-to-SMS in Vercel env vars.`;
+      }
+    } catch(err) { results.smsDelivery = `FAIL: SMS delivery error — ${err.message}`; }
     setTestComplete({...results});
     await new Promise(r=>setTimeout(r,500));
     // 7. Claude Audit (live)
@@ -2748,32 +2777,86 @@ export default function FOLATAC() {
             </div>
           </div>
 
-          {/* Portfolio state + P&L from inception — always visible */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:ssResult?10:0}}>
-            {[
-              { label:"P&L FROM INCEPTION",
-                value: inceptionPL !== null ? `${inceptionPL >= 0 ? "+" : ""}${fmt(inceptionPL)}` : "Upload →",
-                sub: inceptionPLPct !== null ? `${inceptionPLPct >= 0 ? "+" : ""}${inceptionPLPct.toFixed(1)}% since start` : `Starting: ${fmt(startingCapital)}`,
-                color: inceptionPL >= 0 ? C.green : C.red, big:true },
-              { label:"PORTFOLIO TOTAL",
-                value: portVal ? fmt(portVal.combined) : "—",
-                sub: portVal ? `P1: ${fmt(portVal.p1.total)} · P2: ${fmt(portVal.p2.total)}` : "enter data to calculate",
-                color:"#0a84ff", big:true },
-              { label:"WEEKLY INCOME (EST)",
-                value: fmt(income.total),
-                sub: `${kellyContracts.p1+kellyContracts.p2} contracts · ${effectiveRoute.pct}% → Tier C`,
-                color: C.gold },
-              { label:"TIER C → LEAPS",
-                value: `${(port?.p1Leaps||0)+(port?.p2Leaps||0)} contracts`,
-                sub: `$${fmt(leapSummary.totalCost||0).replace("$","")} total cost · ${leapTarget.phase}`,
-                color: C.gold },
-            ].map((s,i)=>(
-              <div key={i} style={{background:"#ffffff08",borderRadius:8,padding:10}}>
-                <div style={{color:C.dim,fontSize:8,letterSpacing:"0.08em",marginBottom:3}}>{s.label}</div>
-                <div style={{fontFamily:"'SF Mono','Fira Code','Courier New',monospace",color:s.color,fontSize:s.big?16:14,fontWeight:700,lineHeight:1.1}}>{s.value}</div>
-                <div style={{color:C.dim,fontSize:8,marginTop:2}}>{s.sub}</div>
+          {/* Portfolio P1 / P2 — separate tracking */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+            {/* P1 CARD */}
+            <div style={{background:"linear-gradient(135deg,#0a0a1a,#0d0d2a)",border:"1px solid #3b82f644",borderRadius:10,padding:14}}>
+              <div style={{color:"#3b82f6",fontSize:10,fontWeight:700,letterSpacing:"0.1em",marginBottom:8}}>P1 — MARGIN SPREAD</div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
+                <div style={{color:C.dim,fontSize:8}}>PORTFOLIO VALUE</div>
+                <div style={{fontFamily:"monospace",color:p1Total>0?"#fff":"#666",fontSize:18,fontWeight:700}}>{p1Total>0?fmt(p1Total):"—"}</div>
               </div>
-            ))}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
+                <div style={{color:C.dim,fontSize:8}}>P&L FROM DAY 1</div>
+                <div style={{fontFamily:"monospace",fontSize:16,fontWeight:900,
+                  color:p1PL===null?"#fff":p1PL>0?"#22c55e":p1PL<0?"#ef4444":"#fff"}}>
+                  {p1PL!==null?`${p1PL>=0?"+":""}${fmt(p1PL)}`:"SET START →"}
+                </div>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+                <div style={{color:C.dim,fontSize:8}}>RETURN</div>
+                <div style={{fontFamily:"monospace",fontSize:14,fontWeight:900,
+                  color:p1PLPct===null?"#fff":p1PLPct>0?"#22c55e":p1PLPct<0?"#ef4444":"#fff"}}>
+                  {p1PLPct!==null?`${p1PLPct>=0?"+":""}${p1PLPct.toFixed(2)}%`:"—"}
+                </div>
+              </div>
+              <div style={{marginTop:8,display:"flex",gap:6,alignItems:"center"}}>
+                <div style={{color:C.dim,fontSize:8}}>Start:</div>
+                <input type="number" value={p1StartCap||""} onChange={e=>{const v=parseFloat(e.target.value);if(!isNaN(v)&&v>=0)setP1StartCap(v)}}
+                  placeholder="P1 starting $" style={{flex:1,background:"#ffffff08",border:"1px solid #3b82f633",color:"#3b82f6",padding:"4px 8px",borderRadius:6,fontSize:10,fontFamily:"monospace"}}/>
+              </div>
+            </div>
+            {/* P2 CARD */}
+            <div style={{background:"linear-gradient(135deg,#0a1a0a,#0d2a0d)",border:"1px solid #22c55e44",borderRadius:10,padding:14}}>
+              <div style={{color:"#22c55e",fontSize:10,fontWeight:700,letterSpacing:"0.1em",marginBottom:8}}>P2 — CASH SECURED (GF)</div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
+                <div style={{color:C.dim,fontSize:8}}>PORTFOLIO VALUE</div>
+                <div style={{fontFamily:"monospace",color:p2Total>0?"#fff":"#666",fontSize:18,fontWeight:700}}>{p2Total>0?fmt(p2Total):"—"}</div>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
+                <div style={{color:C.dim,fontSize:8}}>P&L FROM DAY 1</div>
+                <div style={{fontFamily:"monospace",fontSize:16,fontWeight:900,
+                  color:p2PL===null?"#fff":p2PL>0?"#22c55e":p2PL<0?"#ef4444":"#fff"}}>
+                  {p2PL!==null?`${p2PL>=0?"+":""}${fmt(p2PL)}`:"SET START →"}
+                </div>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+                <div style={{color:C.dim,fontSize:8}}>RETURN</div>
+                <div style={{fontFamily:"monospace",fontSize:14,fontWeight:900,
+                  color:p2PLPct===null?"#fff":p2PLPct>0?"#22c55e":p2PLPct<0?"#ef4444":"#fff"}}>
+                  {p2PLPct!==null?`${p2PLPct>=0?"+":""}${p2PLPct.toFixed(2)}%`:"—"}
+                </div>
+              </div>
+              <div style={{marginTop:8,display:"flex",gap:6,alignItems:"center"}}>
+                <div style={{color:C.dim,fontSize:8}}>Start:</div>
+                <input type="number" value={p2StartCap||""} onChange={e=>{const v=parseFloat(e.target.value);if(!isNaN(v)&&v>=0)setP2StartCap(v)}}
+                  placeholder="P2 starting $" style={{flex:1,background:"#ffffff08",border:"1px solid #22c55e33",color:"#22c55e",padding:"4px 8px",borderRadius:6,fontSize:10,fontFamily:"monospace"}}/>
+              </div>
+            </div>
+          </div>
+          {/* Combined P&L + Income row */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:ssResult?10:0}}>
+            <div style={{background:"#ffffff08",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{color:C.dim,fontSize:8,letterSpacing:"0.08em",marginBottom:3}}>COMBINED P&L</div>
+              <div style={{fontFamily:"monospace",fontSize:16,fontWeight:900,
+                color:inceptionPL===null?"#fff":inceptionPL>0?"#22c55e":inceptionPL<0?"#ef4444":"#fff"}}>
+                {inceptionPL!==null?`${inceptionPL>=0?"+":""}${fmt(inceptionPL)}`:"—"}
+              </div>
+              <div style={{fontFamily:"monospace",fontSize:11,fontWeight:700,marginTop:2,
+                color:inceptionPLPct===null?"#666":inceptionPLPct>0?"#22c55e":inceptionPLPct<0?"#ef4444":"#fff"}}>
+                {inceptionPLPct!==null?`${inceptionPLPct>=0?"+":""}${inceptionPLPct.toFixed(2)}%`:"set starting capitals above"}
+              </div>
+            </div>
+            <div style={{background:"#ffffff08",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{color:C.dim,fontSize:8,letterSpacing:"0.08em",marginBottom:3}}>WEEKLY INCOME (EST)</div>
+              <div style={{fontFamily:"monospace",color:C.gold,fontSize:14,fontWeight:700}}>{fmt(income.total)}</div>
+              <div style={{color:C.dim,fontSize:8,marginTop:2}}>{kellyContracts.p1+kellyContracts.p2} contracts · {effectiveRoute.pct}% → Tier C</div>
+            </div>
+            <div style={{background:"#ffffff08",borderRadius:8,padding:10,textAlign:"center"}}>
+              <div style={{color:C.dim,fontSize:8,letterSpacing:"0.08em",marginBottom:3}}>TIER C → LEAPS</div>
+              <div style={{fontFamily:"monospace",color:C.gold,fontSize:14,fontWeight:700}}>{(port?.p1Leaps||0)+(port?.p2Leaps||0)} contracts</div>
+              <div style={{color:C.dim,fontSize:8,marginTop:2}}>${fmt(leapSummary.totalCost||0).replace("$","")} total cost · {leapTarget.phase}</div>
+            </div>
           </div>
 
           {/* Screenshot parse results */}
@@ -4153,10 +4236,10 @@ export default function FOLATAC() {
                 <div style={{color:C.mid,fontSize:10,fontWeight:600,marginBottom:6}}>📤 EXPORT</div>
                 <button onClick={()=>{
                   const snapshot = {
-                    version:"folatac-v12",
+                    version:"folatac-v15",
                     exported: new Date().toISOString(),
                     port, sigs, allInCount, exitSigs, pnlLog, leapLog,
-                    snapshots, startingCapital, manualPillarsBroken,
+                    snapshots, startingCapital, p1StartCap, p2StartCap, manualPillarsBroken,
                     manualData, editedCFG, userPhone, gfPhone, userCarrier, gfCarrier, telegramChatId, p1Protected,
                   };
                   const blob = new Blob([JSON.stringify(snapshot,null,2)],{type:"application/json"});
@@ -4181,7 +4264,7 @@ export default function FOLATAC() {
                     try {
                       const text = await file.text();
                       const data = JSON.parse(text);
-                      if(data.version !== "folatac-v12") { alert("⚠ File is not a FOLATAC v12 backup"); return; }
+                      if(!data.version?.startsWith("folatac-v")) { alert("⚠ File is not a FOLATAC backup"); return; }
                       if(data.port)                await setPort(data.port);
                       if(data.sigs)                await setSigs(data.sigs);
                       if(data.allInCount!=null)    await setAllInCount(data.allInCount);
@@ -4190,6 +4273,8 @@ export default function FOLATAC() {
                       if(data.leapLog)             await setLeapLog(data.leapLog);
                       if(data.snapshots)           await setSnapshots(data.snapshots);
                       if(data.startingCapital)     await setStartingCapital(data.startingCapital);
+                      if(data.p1StartCap)          await setP1StartCap(data.p1StartCap);
+                      if(data.p2StartCap)          await setP2StartCap(data.p2StartCap);
                       if(data.manualPillarsBroken!=null) await setManualPillarsBroken(data.manualPillarsBroken);
                       if(data.manualData)          await setManualData(data.manualData);
                       if(data.editedCFG)           await setEditedCFG(data.editedCFG);
