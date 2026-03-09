@@ -2303,74 +2303,89 @@ export default function FOLATAC() {
 
   // ── handlers
   const handleSS = async (e) => {
-    const file = e.target.files?.[0]; if(!file) return;
+    const files = Array.from(e.target.files||[]); if(!files.length) return;
     setSsBusy(true); setSsResult(null);
-    const reader = new FileReader();
-    reader.onload = async()=>{
-      const b64 = reader.result.split(",")[1];
-      const result = await parseScreenshot(b64, file.type||"image/png");
-      if(result){
-        setSsResult(result);
-        const today = new Date().toISOString().split("T")[0];
 
-        // Update portfolio state
-        setPort(p=>({...p,
-          p1Shares:  result.p1AssignedShares??p.p1Shares,
-          p2Shares:  result.p2AssignedShares??p.p2Shares,
-          p1Leaps:   result.p1LEAPContracts??p.p1Leaps,
-          p2Leaps:   result.p2LEAPContracts??p.p2Leaps,
-          p1TierA:   result.p1TierACash??p.p1TierA,
-          p2TierA:   result.p2TierACash??p.p2TierA,
-          p1CB:      result.p1ShareCostBasis??p.p1CB,
-          p2CB:      result.p2ShareCostBasis??p.p2CB,
-          p1OpenContracts: result.p1OpenContracts??p.p1OpenContracts,
-          p2OpenContracts: result.p2OpenContracts??p.p2OpenContracts,
-          p1AssignmentDate: (result.p1AssignedShares>0&&!p.p1AssignmentDate) ? today : p.p1AssignmentDate,
-          p2AssignmentDate: (result.p2AssignedShares>0&&!p.p2AssignmentDate) ? today : p.p2AssignmentDate,
-        }));
+    // Read all files as base64
+    const readFile = (f) => new Promise((resolve) => {
+      const r = new FileReader();
+      r.onload = () => resolve({ b64: r.result.split(",")[1], mediaType: f.type || "image/png" });
+      r.onerror = () => resolve(null);
+      r.readAsDataURL(f);
+    });
+    const images = (await Promise.all(files.map(readFile))).filter(Boolean);
+    if (!images.length) { setSsBusy(false); return; }
 
-        // Auto-snapshot for P&L from inception (stores daily account value)
-        const p1Total = result.p1TotalAccountValue;
-        const p2Total = result.p2TotalAccountValue;
-        if (p1Total || p2Total) {
-          const combined = (p1Total||0) + (p2Total||0);
-          setSnapshots(snaps => {
-            const existing = snaps.find(s=>s.date===today);
-            if (existing) return snaps.map(s=>s.date===today ? {...s, p1Total, p2Total, combined} : s);
-            return [...snaps, { date:today, p1Total, p2Total, combined }];
-          });
-        }
+    // Send all images in one request
+    let result;
+    try {
+      const r = await fetch("/api/ai", { method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({ action:"screenshot", images }) });
+      const d = await r.json();
+      result = d.result || null;
+    } catch(err) { result = null; }
 
-        // Auto-populate P&L log from recently closed positions detected in screenshot
-        const closed = result.recentlyClosedPositions||[];
-        if (closed.length > 0) {
-          setPnlLog(log => {
-            const existing = new Set(log.map(t=>`${t.date}-${t.strike}-${t.contracts}`));
-            const newTrades = closed.filter(c=>c.date&&c.strike&&c.contracts&&
-              !existing.has(`${c.date}-${c.strike}-${c.contracts}`))
-              .map(c=>({ date:c.date||today, strike:c.strike, contracts:c.contracts,
-                premium:c.premium||0, result:c.result||"expired",
-                tierCDeployed: Math.round((c.premium||0) * 0.15) })); // default 15% routing
-            return [...log, ...newTrades];
-          });
-        }
+    if(result){
+      setSsResult(result);
+      const today = new Date().toISOString().split("T")[0];
 
-        // Auto-populate LEAP log from newly purchased LEAPs
-        const newLeaps = result.recentlyPurchasedLeaps||[];
-        if (newLeaps.length > 0) {
-          setLeapLog(log => {
-            const existing = new Set(log.map(l=>`${l.date}-${l.strike}-${l.contracts}`));
-            const newEntries = newLeaps.filter(l=>l.date&&l.strike&&l.contracts&&
-              !existing.has(`${l.date}-${l.strike}-${l.contracts}`))
-              .map(l=>({ date:l.date||today, strike:l.strike, contracts:l.contracts,
-                costPerContract:l.costPerContract||0, totalCost:(l.contracts||0)*(l.costPerContract||0) }));
-            return [...log, ...newEntries];
-          });
-        }
+      // Update portfolio state
+      setPort(p=>({...p,
+        p1Shares:  result.p1AssignedShares??p.p1Shares,
+        p2Shares:  result.p2AssignedShares??p.p2Shares,
+        p1Leaps:   result.p1LEAPContracts??p.p1Leaps,
+        p2Leaps:   result.p2LEAPContracts??p.p2Leaps,
+        p1TierA:   result.p1TierACash??p.p1TierA,
+        p2TierA:   result.p2TierACash??p.p2TierA,
+        p1CB:      result.p1ShareCostBasis??p.p1CB,
+        p2CB:      result.p2ShareCostBasis??p.p2CB,
+        p1OpenContracts: result.p1OpenContracts??p.p1OpenContracts,
+        p2OpenContracts: result.p2OpenContracts??p.p2OpenContracts,
+        p1AssignmentDate: (result.p1AssignedShares>0&&!p.p1AssignmentDate) ? today : p.p1AssignmentDate,
+        p2AssignmentDate: (result.p2AssignedShares>0&&!p.p2AssignmentDate) ? today : p.p2AssignmentDate,
+      }));
+
+      // Auto-snapshot for P&L from inception (stores daily account value)
+      const p1Total = result.p1TotalAccountValue;
+      const p2Total = result.p2TotalAccountValue;
+      if (p1Total || p2Total) {
+        const combined = (p1Total||0) + (p2Total||0);
+        setSnapshots(snaps => {
+          const existing = snaps.find(s=>s.date===today);
+          if (existing) return snaps.map(s=>s.date===today ? {...s, p1Total, p2Total, combined} : s);
+          return [...snaps, { date:today, p1Total, p2Total, combined }];
+        });
       }
-      setSsBusy(false);
-    };
-    reader.readAsDataURL(file);
+
+      // Auto-populate P&L log from recently closed positions detected in screenshot
+      const closed = result.recentlyClosedPositions||[];
+      if (closed.length > 0) {
+        setPnlLog(log => {
+          const existing = new Set(log.map(t=>`${t.date}-${t.strike}-${t.contracts}`));
+          const newTrades = closed.filter(c=>c.date&&c.strike&&c.contracts&&
+            !existing.has(`${c.date}-${c.strike}-${c.contracts}`))
+            .map(c=>({ date:c.date||today, strike:c.strike, contracts:c.contracts,
+              premium:c.premium||0, result:c.result||"expired",
+              tierCDeployed: Math.round((c.premium||0) * 0.15) })); // default 15% routing
+          return [...log, ...newTrades];
+        });
+      }
+
+      // Auto-populate LEAP log from newly purchased LEAPs
+      const newLeaps = result.recentlyPurchasedLeaps||[];
+      if (newLeaps.length > 0) {
+        setLeapLog(log => {
+          const existing = new Set(log.map(l=>`${l.date}-${l.strike}-${l.contracts}`));
+          const newEntries = newLeaps.filter(l=>l.date&&l.strike&&l.contracts&&
+            !existing.has(`${l.date}-${l.strike}-${l.contracts}`))
+            .map(l=>({ date:l.date||today, strike:l.strike, contracts:l.contracts,
+              costPerContract:l.costPerContract||0, totalCost:(l.contracts||0)*(l.costPerContract||0) }));
+          return [...log, ...newEntries];
+        });
+      }
+    }
+    setSsBusy(false);
   };
 
   const handleSMS = async()=>{
@@ -2719,13 +2734,13 @@ export default function FOLATAC() {
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
             <div>
               <div style={{color:C.green,fontSize:12,fontWeight:700,letterSpacing:"0.1em"}}>📷 DAILY PORTFOLIO UPLOAD</div>
-              <div style={{color:C.dim,fontSize:9,marginTop:2}}>Upload your brokerage screenshot every day. System auto-reads positions, updates P&L, and generates today's trades.</div>
+              <div style={{color:C.dim,fontSize:9,marginTop:2}}>Upload up to 10 brokerage screenshots at once. System reads all images together, extracts positions, updates P&L, and generates today's trades.</div>
             </div>
             <div style={{display:"flex",gap:8,alignItems:"center"}}>
               {p1Protected && etDay===1 && (
                 <span style={{background:C.greenDim,color:C.green,border:`1px solid ${C.green}44`,borderRadius:6,padding:"3px 8px",fontSize:9,fontWeight:700}}>✓ P1 PROTECTED</span>
               )}
-              <input ref={fileRef} type="file" accept="image/*" onChange={handleSS} style={{display:"none"}} />
+              <input ref={fileRef} type="file" accept="image/*" multiple onChange={handleSS} style={{display:"none"}} />
               <button onClick={()=>fileRef.current?.click()}
                 style={{background:ssBusy?C.bg3:C.green,color:ssBusy?"#fff":"#000",border:"none",borderRadius:8,padding:"8px 16px",cursor:ssBusy?"not-allowed":"pointer",fontSize:11,fontWeight:700,minWidth:130,transition:"all 0.15s"}}>
                 {ssBusy?"⏳ Analyzing…":"📷 Upload"}

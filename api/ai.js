@@ -21,11 +21,13 @@ export default async function handler(req, res) {
   try {
     switch (action) {
 
-      // ── Parse brokerage screenshot
+      // ── Parse brokerage screenshot(s) — supports up to 10 images
       case 'screenshot': {
-        const { b64, mediaType } = body;
+        const { b64, mediaType, images } = body;
         const PROMPT = [
-          'You are parsing a brokerage account screenshot for an MSTR options strategy.',
+          'You are parsing brokerage account screenshot(s) for an MSTR options strategy.',
+          'There may be multiple screenshots showing different parts of the same portfolio.',
+          'Combine data from ALL images into a single unified result.',
           'Extract ALL visible data. Return ONLY valid JSON, no markdown:',
           '{ "p1OpenContracts":0, "p2OpenContracts":0, "p1AssignedShares":0, "p2AssignedShares":0,',
           '  "p1LEAPContracts":0, "p2LEAPContracts":0, "p1TierACash":null, "p2TierACash":null,',
@@ -38,14 +40,24 @@ export default async function handler(req, res) {
           'Use null for unknown values. Never guess. Only report clearly visible data.',
         ].join('\n');
 
+        // Build content array with all images
+        const contentParts = [];
+        if (images && images.length > 0) {
+          // Multi-image mode
+          for (const img of images) {
+            contentParts.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType || 'image/png', data: img.b64 } });
+          }
+        } else if (b64) {
+          // Single image (backwards compatible)
+          contentParts.push({ type: 'image', source: { type: 'base64', media_type: mediaType || 'image/png', data: b64 } });
+        }
+        contentParts.push({ type: 'text', text: PROMPT });
+
         const r = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST', headers,
           body: JSON.stringify({
-            model: 'claude-sonnet-4-6', max_tokens: 800,
-            messages: [{ role: 'user', content: [
-              { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/png', data: b64 } },
-              { type: 'text', text: PROMPT },
-            ]}],
+            model: 'claude-sonnet-4-6', max_tokens: 1200,
+            messages: [{ role: 'user', content: contentParts }],
           }),
         });
         const d = await r.json();
